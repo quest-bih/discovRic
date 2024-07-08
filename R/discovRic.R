@@ -50,13 +50,19 @@ res <- oa_fetch(doi = iv_dois, entity = "works", mailto = Sys.getenv("EMAIL"))
 
 oaids <- res$id
 
+# unclear what upper bound on identifiers is (or dois). Works supposedly faster with oaids
+# so step 1 convert doi to oaid, step two chunk oaids to right size, step 3 map function over all oaids to get citing oaids
+# step 4 fetch dois from oaids
+
+
+
 sb_res <- oa_snowball(identifier = oaids[1:100], id_type = "original", cited_by_params = list(from_publication_date = "2025-01-01"),
                     mailto = Sys.getenv("EMAIL"))
 
 
 sb_df <- snowball2df(sb_res)
 
-
+cited_id <- "10.1016/j.bbmt.2011.12.041"
 
 get_citing_dois_from_oa <- function(cited_id, sleep = 1, mailto = Sys.getenv("EMAIL")) {
   
@@ -76,28 +82,40 @@ get_citing_dois_from_oa <- function(cited_id, sleep = 1, mailto = Sys.getenv("EM
   }
   Sys.sleep(stats::rgamma(1, sleep))
   
-  openalexR::oa_fetch(cites = oaid, entity = "works",
-           mailto = mailto) |> 
-    dplyr::select(cited_by_doi = doi, cited_by = id) |> 
-    dplyr::mutate(cited_work = oaid,
-           cited_work_doi = cited_doi)
+  records <- openalexR::oa_fetch(cites = oaid, entity = "works",
+           mailto = mailto) 
+  
+  if (rlang::is_null(records)) {
+   return(tibble::tibble(cited_by_doi = "no citations found", cited_by = "no citations found",
+                 cited_work = oaid, cited_work_doi = cited_doi))
+  } else {
+    return(records |> 
+             dplyr::select(cited_by_doi = doi, cited_by = id) |> 
+             dplyr::mutate(cited_work = oaid,
+                           cited_work_doi = cited_doi))
+  }
 }
 
 
 # Cochrange systematic Reviews have a doi schema:
 cochrane_cd_regex <- "10.1002/14651858.cd" 
 
-cites_all <- cites |> 
-  list_rbind()
-
-cites2 <- iv_dois[11:length(iv_dois)] |> 
+cites <- iv_dois[1:800] |> # takes ca. 5 hours!!!
   map(get_citing_dois_from_oa, .progress = TRUE)
 
-cites_batch <- cites2 |> 
+cites_batch <- cites |> 
   list_rbind()
 
-cites_all <- cites_all |> 
-  bind_rows(cites_batch)
+
+cites2 <- iv_dois[801:2500] |> # takes ca. 5 hours!!!
+  map(get_citing_dois_from_oa, .progress = TRUE)
+
+cites_batch2 <- cites2 |> 
+  list_rbind()
+test <- get_citing_dois_from_oa(iv_dois[801:1700][27])
+
+cites_all <- cites_batch1 |> 
+  bind_rows(cites_batch2)
 
 
 
@@ -107,4 +125,4 @@ cochrane_reviews <- cites |>
   filter(str_detect(cited_by_doi, cochrane_cd_regex))
 
 
-
+doi_817 <- openalexR::oa_fetch(doi = iv_dois[817], entity = "works", mailto = Sys.getenv("EMAIL"))
