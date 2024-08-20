@@ -1,0 +1,227 @@
+---
+title: "Impact Citations of IntoValue clinical trials"
+format:
+  html:
+    self-contained: true
+editor: visual
+---
+
+```{r}
+#| include: false
+
+library(tidyverse)
+library(here)
+library(ggVennDiagram)
+library(readxl)
+library(DT)
+
+iv_data <- read_csv(here("data", "raw", "intovalue.csv")) |> 
+  mutate(has_doi = !is.na(doi),
+         has_pubmed = !is.na(has_pubmed))
+
+# res <- iv_data |> 
+#   select(id, has_pubmed, has_publication, doi, pmid) |>  
+#   count(has_publication, has_pubmed, has_doi, sort = TRUE)
+
+publications <- iv_data |> 
+  filter(identification_step != "No publ") |> 
+  distinct(id, doi, pmid, .keep_all = TRUE) |> 
+  select(id, doi, pmid, has_doi, has_pubmed, everything())
+
+neither <- publications$id[!publications$has_doi & !publications$has_pubmed]
+neither_check <- publications |> 
+  filter(id %in% neither, !is.na(doi))
+
+only_pmid <- publications$id[!publications$has_doi & publications$has_pubmed] |> unique()
+
+publications <- publications |> 
+  filter(!id %in% neither_check$id) |> 
+  bind_rows(neither_check) |> 
+  mutate(pub_idn = 1:n())
+```
+
+## IntoValue data set
+
+The IntoValue data set currently contains n = `r distinct(iv_data, id) |> nrow()` unique trials and n = `r nrow(publications)` publications (@fig-articles). Some of the publications only include the DOI in the dataset, even if there is a corresponding PMID, while some publications do not have PMIDs at all, but here we have taken the data set as is, without trying to enrich for missing PMID values.
+
+```{r}
+#| echo: false
+#| label: fig-articles
+#| fig-cap: Articles and unique identifiers.
+# publications |> 
+#   count(has_doi, has_pubmed)
+
+
+ids <- list(has_doi = publications$pub_idn[publications$has_doi], has_pmid = publications$pub_idn[publications$has_pubmed], has_neither = publications$pub_idn[!publications$has_doi & !publications$has_pubmed])
+
+ggVennDiagram(ids, force_upset = TRUE, nintersects = 4)
+```
+
+```{r}
+#| echo: false
+#| warning: false
+
+iv_citations <- readRDS(here("data", "processed", "citations.rds")) |> 
+  mutate(cited_by_doi_deversioned = str_remove(cited_by_doi, "\\.pub.*"))
+cochrane_cd_regex <- "10\\.1002\\/14651858\\.cd."
+
+
+cochrane_reviews <- iv_citations |> 
+  filter(str_detect(cited_by_doi, cochrane_cd_regex)) |> 
+  mutate(doi_deversioned = str_extract(cited_by_doi_deversioned, "10\\..*"))
+
+publications_ids <- publications |> 
+  select(id, cited_work_doi = doi, pmid, has_doi, has_pubmed)
+
+has_cochrane <- iv_citations |> 
+  group_by(cited_work_doi, cited_work_pmid, cited_work) |> 
+  summarise(has_cochrane_review = any(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
+            n_cochrane = sum(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
+            n_cochrane_unique = sum(str_detect(unique(cited_by_doi_deversioned), cochrane_cd_regex), na.rm = TRUE)) |> 
+  left_join(publications_ids |> filter(!is.na(cited_work_doi)), by = "cited_work_doi")
+
+has_cochrane_only_pmid <- has_cochrane |> 
+  ungroup() |> 
+  filter(!is.na(cited_work_pmid)) |> 
+  select(cited_work_pmid:n_cochrane_unique) |> 
+  left_join(publications_ids, by = c("cited_work_pmid" = "pmid"))
+
+has_cochrane <- has_cochrane |> 
+  filter(is.na(cited_work_pmid)) |> 
+  mutate(cited_work_pmid = coalesce(pmid, cited_work_pmid)) |> 
+  select(-pmid) |> 
+  bind_rows(has_cochrane_only_pmid)
+
+has_cochrane_no_pubmed <- has_cochrane |> 
+  filter(has_pubmed == FALSE, has_cochrane_review == TRUE, is.na(cited_work_pmid)) |> 
+  distinct(cited_work_doi, .keep_all = TRUE)
+
+ivcpm <- readRDS(here("data", "processed", "citations_pmid.rds")) |> 
+    mutate(cited_by_doi_deversioned = str_remove(cited_by_doi, "\\.pub.*"))
+
+cochrane_reviews_pm <- ivcpm |> 
+  filter(str_detect(cited_by_doi, cochrane_cd_regex)) |> 
+  mutate(doi_deversioned = cited_by_doi_deversioned)
+
+has_cochrane_pmid <- ivcpm |> 
+  group_by(cited_work, cited_work_doi) |> 
+  summarise(has_cochrane_review = any(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
+            n_cochrane = sum(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
+            n_cochrane_unique = sum(str_detect(unique(cited_by_doi_deversioned), cochrane_cd_regex), na.rm = TRUE)) 
+
+only_coch_pm <- has_cochrane_pmid |> 
+  filter(has_cochrane_review == TRUE)
+only_coch_oa <- has_cochrane |> 
+  filter(has_cochrane_review == TRUE)
+
+only_in_oa <- anti_join(only_coch_oa, only_coch_pm, by = "cited_work_doi") |> 
+  distinct(cited_work_doi, .keep_all = TRUE)
+only_in_pm <- anti_join(only_coch_pm, only_coch_oa, by = "cited_work_doi")
+# only_in_pm2 <- only_coch_pm |> 
+#   filter(!cited_work_doi %in% only_coch_oa$cited_work_doi)
+
+unique_cochrane <- has_cochrane |>
+  filter(has_cochrane_review == TRUE) |>
+  distinct(cited_work_doi, cited_work_pmid, .keep_all = TRUE)
+
+cochrane_pmid_no_doi <- only_coch_oa |> 
+  filter(is.na(cited_work_doi), !is.na(cited_work_pmid)) |> 
+  distinct(cited_work)
+
+cochrane <- list(PubMed = only_coch_pm |> filter(!is.na(cited_work_doi)) |> pull(cited_work_doi),
+             openAlex = only_coch_oa |> filter(!is.na(cited_work_doi)) |> distinct(cited_work_doi, .keep_all = TRUE) |>  pull(cited_work_doi))
+# diff_dois <- setdiff(only_coch_oa$cited_work_doi, only_coch_pm$cited_work_doi)
+
+dois_not_in_oa <- publications |> 
+  filter(!doi %in% has_cochrane$cited_work_doi)
+
+```
+
+## Forward citation searches
+
+In order to find out whether the IntoValue trial publications have impact citations (have been cited by Cochrane Reviews), we performed forward citation searches with two different sources: openAlex and PubMed.
+
+Using openAlex, we discovered that n = `r nrow(unique_cochrane)` IntoValue publications were cited in at least one Cochrane Review, with n = `r nrow(has_cochrane_no_pubmed)` publications without a PMID and therefore not on PubMed. Publications only with a PMID but no DOI can be found on both openAlex and PubMed. A small number of publications with DOIs (n = `r nrow(dois_not_in_oa)`) were not found on openAlex.
+
+Using PubMed, we found an additional n = `r nrow(only_in_pm)` publications that were cited in at least one Cochrane Review and had DOIs, but their citations were not properly indexed on openAlex (@fig-citations). Conversely, n = `r nrow(only_in_oa)` of publications were only recognized as cited in Cochrane Reviews on openAlex but not on PubMed (@fig-citations), with n = `r nrow(only_in_oa) - nrow(has_cochrane_no_pubmed)` of these likely improperly indexed on PubMed. For the publications that had only PMIDs and no DOIs, both sources found n = `r nrow(cochrane_pmid_no_doi)` out of n = `r length(only_pmid)` publications.
+
+```{r}
+#| echo: false
+#| label: fig-citations
+#| fig-cap: IntoValue publications with a DOI that were cited in at least one Cochrane Review (or protocol).
+
+
+ggVennDiagram(cochrane, force_upset = TRUE)
+
+```
+
+### Crossreferences with Cochrane Library
+
+```{r}
+#| echo: false
+
+cochranes <- read_xlsx(here("data", "raw", "citation-export.xlsx")) |> 
+  mutate(doi = paste0("10.1002/14651858.", `Cochrane Review ID`) |> 
+           tolower(),
+         doi_deversioned = str_remove(doi, ".pub.*"))
+
+# dupes <- has_cochrane |> 
+#   janitor::get_dupes(cited_work)
+
+citing_cochranes_found <- cochrane_reviews |>
+  select(doi_deversioned) |> 
+  bind_rows(cochrane_reviews_pm |> select(doi_deversioned)) |> 
+  distinct(doi_deversioned) |> 
+  pull(doi_deversioned)
+
+# cochranes |> 
+#   filter(doi_deversioned %in% citing_cochranes_found) |> 
+#   nrow()
+
+cochranes_not_in_db <- setdiff(citing_cochranes_found, cochranes$doi_deversioned)
+
+protocols_and_withdrawn <- cochrane_reviews |> 
+  filter(doi_deversioned %in% cochranes_not_in_db)
+
+n_withdrawn <- protocols_and_withdrawn |> 
+  filter(str_detect(cited_by_doi, "pub")) |> 
+  nrow()
+
+n_protocols <- protocols_and_withdrawn |> 
+  filter(!str_detect(cited_by_doi, "pub")) |> 
+  nrow()
+
+n_methodology_reviews <- cochranes |> 
+  filter(str_detect(`Cochrane Review ID`, "MR")) |> 
+  nrow()
+
+reviews_only_in_oa <- cochrane_reviews |> 
+  filter(cited_work_doi %in% only_in_oa$cited_work_doi)
+
+protocol_check <- reviews_only_in_oa |> 
+  filter(doi_deversioned %in% protocols_and_withdrawn$doi_deversioned)
+
+```
+
+All of the Cochrane Library Reviews were provided to us by Julian Hirt as an Excel file. We cross referenced the n = `r length(citing_cochranes_found)` Cochrane Reviews and protocols extracted above with this list of Cochrane Reviews and discovered that there were n = `r nrow(protocols_and_withdrawn)` items not in the Cochrane Library list. From these, n = `r n_protocols` were protocols with no corresponding reviews, two were withdrawn reviews, and one was a review with a major change.
+
+Checking the reviews that were discovered via openAlex but were not on PubMed with the Cochrane Library list revealed that nearly half, `r nrow(protocol_check)` out of `r nrow(reviews_only_in_oa)`, were protocols with no corresponding reviews (and therefore not on the list). As most discrepancies seem to involve protocols, we should perhaps exclude protocols from the detection step.
+
+Finally, the Cochrane Library included n = `r n_methodology_reviews` items of type Review - Methodology, which had a different naming scheme ("10.1002/14651858.MR00XXXX") than the rest of the Cochrane Reviews. We can easily include those as well, if we want to also consider them as Cochrane Reviews.
+
+## Data preview
+
+```{r}
+#| echo: false
+
+datatable(has_cochrane, 
+          caption = htmltools::tags$caption(
+    style = 'caption-side: top; text-align: left;',
+    "IntoValue publications summary from openAlex"),
+          rownames = FALSE, extensions = "Buttons", 
+          options = list(
+            dom = "tB",
+            buttons = c('copy', 'csv', 'excel')
+            ))
+
+```
