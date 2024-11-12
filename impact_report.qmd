@@ -15,47 +15,106 @@ library(ggVennDiagram)
 library(readxl)
 library(DT)
 
-iv_data <- read_csv(here("data", "raw", "intovalue.csv")) |> 
+
+iv_data <- read_csv(here("data", "raw", "cttd.csv")) |> 
   mutate(has_doi = !is.na(doi),
          has_pubmed = !is.na(has_pubmed))
+
+
+iv_qual <- iv_data |> 
+  count(has_publication, publication_type, identification_step, sort = TRUE)
+
+
+supls <- iv_data |> 
+  filter(has_publication == TRUE, str_detect(doi, "sup")) |> 
+  select(id, doi, pmid, has_publication, everything())
+
+iv_non_article <- iv_data |> 
+  filter(has_publication == FALSE | doi %in% supls$doi)
+# iv_data <- read_csv(here("data", "raw", "intovalue.csv")) |> 
+#   mutate(has_doi = !is.na(doi),
+#          has_pubmed = !is.na(has_pubmed))
 
 # res <- iv_data |> 
 #   select(id, has_pubmed, has_publication, doi, pmid) |>  
 #   count(has_publication, has_pubmed, has_doi, sort = TRUE)
 
 publications <- iv_data |> 
-  filter(identification_step != "No publ") |> 
+  mutate(has_publication = case_when(
+    doi %in% supls$doi ~ FALSE,
+    .default = has_publication
+  )) |> 
+  filter(has_publication == TRUE, ) |> 
   distinct(id, doi, pmid, .keep_all = TRUE) |> 
   select(id, doi, pmid, has_doi, has_pubmed, everything())
 
+publications |>
+  filter(!is.na(doi) | !is.na(pmid)) |>
+  distinct(doi, pmid, .keep_all = TRUE) |>
+  nrow()
+
+# dupes <- publications |> 
+#   filter(!is.na(doi) | !is.na(pmid)) |> 
+#   distinct(doi, pmid, .keep_all = TRUE) |> 
+#   janitor::get_dupes(pmid)
+# dupes <- janitor::get_dupes(publications, doi)
+# # 
+# publications |>
+#   filter(has_doi) |>
+#   distinct(doi) |>
+#   nrow()
+# 
+# publications |> 
+#   distinct(doi, pmid) |> 
+#   count(doi, pmid) |> 
+#   summarise(pmids = sum(!is.na(pmid)),
+#             dois = sum(!is.na(doi)),
+#             both = sum(!is.na(pmid) & !is.na(doi)))
+
 neither <- publications$id[!publications$has_doi & !publications$has_pubmed]
+
 neither_check <- publications |> 
-  filter(id %in% neither, !is.na(doi))
+  filter(id %in% neither)
 
 only_pmid <- publications$id[!publications$has_doi & publications$has_pubmed] |> unique()
 
-publications <- publications |> 
+unique_publications <- publications |> 
   filter(!id %in% neither_check$id) |> 
+  distinct(doi, pmid, .keep_all = TRUE) |> 
   bind_rows(neither_check) |> 
   mutate(pub_idn = 1:n())
 ```
 
 ## IntoValue data set
 
-The IntoValue data set currently contains n = `r distinct(iv_data, id) |> nrow()` unique trials and n = `r nrow(publications)` publications (@fig-articles). Some of the publications only include the DOI in the dataset, even if there is a corresponding PMID, while some publications do not have PMIDs at all, but here we have taken the data set as is, without trying to enrich for missing PMID values.
+The IntoValue data set (taken from the dashboard) currently contains n = `r distinct(iv_data, id) |> nrow()` unique trials and n = `r nrow(unique_publications)` unique publications (@fig-articles). Some of the publications only include the DOI in the dataset, even if there is a corresponding PMID, while some publications do not have PMIDs at all, but here we have taken the data set as is, without trying to enrich for missing PMID values.
+The data set includes information about the publication type for the majority of publications (but not all, @tbl-documents). It also reveals that the majority of publications were linked on the registry, but a substantial number was found via manual searches on Google (@tbl-documents).
+
 
 ```{r}
 #| echo: false
 #| label: fig-articles
 #| fig-cap: Articles and unique identifiers.
-# publications |> 
-#   count(has_doi, has_pubmed)
+ # publications |> 
+ #   count(has_doi, has_pubmed)
+ # iv_data |> 
+ #   filter(has_publication) |> 
+ #   distinct(id) |>
+ #   nrow()
 
-
-ids <- list(has_doi = publications$pub_idn[publications$has_doi], has_pmid = publications$pub_idn[publications$has_pubmed], has_neither = publications$pub_idn[!publications$has_doi & !publications$has_pubmed])
+ids <- list(has_doi = unique_publications$pub_idn[unique_publications$has_doi], has_pmid = unique_publications$pub_idn[unique_publications$has_pubmed], has_neither = unique_publications$pub_idn[!unique_publications$has_doi & !unique_publications$has_pubmed])
 
 ggVennDiagram(ids, force_upset = TRUE, nintersects = 4)
 ```
+
+```{r}
+#| echo: false
+#| label: tbl-documents
+#| tbl-cap: Document types and identification step of publications in IntoValue.
+  knitr::kable(iv_qual)
+```
+
+
 
 ```{r}
 #| echo: false
