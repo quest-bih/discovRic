@@ -87,7 +87,7 @@ unique_publications <- publications |>
 
 ## IntoValue data set
 
-The IntoValue data set (taken from the dashboard) currently contains n = `r distinct(iv_data, id) |> nrow()` unique trials and n = `r nrow(unique_publications)` unique publications (@fig-articles). Some of the publications only include the DOI in the dataset, even if there is a corresponding PMID, while some publications do not have PMIDs at all, but here we have taken the data set as is, without trying to enrich for missing PMID values.
+The IntoValue data set (taken from the dashboard) currently contains n = `r distinct(iv_data, id) |> nrow()` unique trials and n = `r nrow(unique_publications)` unique publications (@fig-articles). Some of the publications only included the DOI in the dataset, even if there was a corresponding PMID, while some publications did not have PMIDs at all, but here we present the data set as is, without trying to enrich for missing PMID values (is this still true?).
 The data set includes information about the publication type for the majority of publications (but not all, @tbl-documents). It also reveals that the majority of publications were linked on the registry, but a substantial number was found via manual searches on Google (@tbl-documents).
 
 
@@ -105,6 +105,7 @@ The data set includes information about the publication type for the majority of
 ids <- list(has_doi = unique_publications$pub_idn[unique_publications$has_doi], has_pmid = unique_publications$pub_idn[unique_publications$has_pubmed], has_neither = unique_publications$pub_idn[!unique_publications$has_doi & !unique_publications$has_pubmed])
 
 ggVennDiagram(ids, force_upset = TRUE, nintersects = 4)
+
 ```
 
 ```{r}
@@ -133,7 +134,7 @@ publications_ids <- publications |>
   select(id, cited_work_doi = doi, pmid, has_doi, has_pubmed)
 
 has_cochrane <- iv_citations |> 
-  group_by(cited_work_doi, cited_work_pmid, cited_work) |> 
+  group_by(cited_work_doi, cited_work_pmid, cited_work_oaid) |> 
   summarise(has_cochrane_review = any(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
             n_cochrane = sum(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
             n_cochrane_unique = sum(str_detect(unique(cited_by_doi_deversioned), cochrane_cd_regex), na.rm = TRUE)) |> 
@@ -163,7 +164,7 @@ cochrane_reviews_pm <- ivcpm |>
   mutate(doi_deversioned = cited_by_doi_deversioned)
 
 has_cochrane_pmid <- ivcpm |> 
-  group_by(cited_work, cited_work_doi) |> 
+  group_by(cited_work_pmid, cited_work_doi) |> 
   summarise(has_cochrane_review = any(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
             n_cochrane = sum(str_detect(cited_by_doi, cochrane_cd_regex), na.rm =  TRUE),
             n_cochrane_unique = sum(str_detect(unique(cited_by_doi_deversioned), cochrane_cd_regex), na.rm = TRUE)) 
@@ -185,7 +186,7 @@ unique_cochrane <- has_cochrane |>
 
 cochrane_pmid_no_doi <- only_coch_oa |> 
   filter(is.na(cited_work_doi), !is.na(cited_work_pmid)) |> 
-  distinct(cited_work)
+  distinct(cited_work_oaid)
 
 cochrane <- list(PubMed = only_coch_pm |> filter(!is.na(cited_work_doi)) |> pull(cited_work_doi),
              openAlex = only_coch_oa |> filter(!is.na(cited_work_doi)) |> distinct(cited_work_doi, .keep_all = TRUE) |>  pull(cited_work_doi))

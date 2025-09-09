@@ -9,28 +9,76 @@ library(ggVennDiagram)
 library(janitor)
 library(readxl)
 library(pdfRetrieve)
-
-### TODO add manually retrieved pmids and dois and perform all citation searchers, etc.
+library(progressr)
 
 # cttd <- read_csv(here("data", "raw", "cttd.csv"))
 
-cttd <- read_xlsx(here("data", "raw", "Dataset_Dashboard.xlsx")) |> 
-  filter(is.na(exclude_include_sgs) | exclude_include_sgs == "include") |> 
-  mutate(doi = coalesce(doi, doi_new_sgs),
-         pmid = coalesce(pmid, pmid_new_sgs))
+# cttd_old <- read_xlsx(here("data", "raw", "Dataset_Dashboard.xlsx")) |> 
+#   filter(is.na(exclude_include_sgs) | exclude_include_sgs == "include") |> 
+#   mutate(doi = coalesce(doi, doi_new_sgs) |> tolower(),
+#          pmid = coalesce(pmid, pmid_new_sgs))
 
-doi_changed <- cttd |> 
-  filter(!is.na(doi_new_sgs) | !is.na(pmid_new_sgs)) |> 
-  select(contains(c("doi", "pmid")), everything())
+cttd <- read_xlsx(here("data", "raw", "combined_dataset_dashboard.xlsx")) |>
+  filter(is.na(exclude_include_sgs) | exclude_include_sgs == "include") |> 
+  mutate(doi = case_when(!is.na(doi_new_sgs) ~ doi_new_sgs,
+                         .default = doi) |> tolower(),
+           
+           # coalesce(doi, doi_new_sgs) |> tolower(),
+         pmid = coalesce(pmid, pmid_new_sgs))
+cttd_unique <- cttd |> 
+  distinct(id, doi, pmid) |> 
+  get_dupes(pmid, doi) |> 
+  filter(!is.na(doi)) |> 
+  write_excel_csv(here("data", "processed", "dupe_pubs.csv"))
+all_oaids <- read_csv(here("data", "raw", "oaids.csv"))
+
+all_oaids |> 
+  count(is.na(pmid), is.na(doi))
+
+oaids_from_doi <- all_oaids |> 
+  filter(!is.na(doi)) |>
+  select(oaid = id, doi)
+
+oaids_from_pmid <- all_oaids |> 
+  filter(!id %in% oaids_from_doi$oaid, !is.na(pmid)) |> 
+  select(oaid = id, pmid)
+
+cttd <- cttd |> 
+  left_join(oaids_from_doi, by = "doi") |> 
+  rows_update(oaids_from_pmid, by = "pmid", unmatched = "ignore")
+
+
+dupes_oaids <- cttd |> 
+  get_dupes(oaid) |> 
+  select(oaid, dupe_count, doi, pmid, everything())
+
+qa_ids <- cttd |> 
+  distinct(doi, pmid, oaid)
+
+# all_oaids <- oaids |> 
+#   bind_rows(all_oaids) |> 
+#   bind_rows(iv_oaids_from_doi) |> 
+#   distinct(id, doi, pmid)
+
+missing_dois <- setdiff(tolower(qa_ids$doi), all_oaids$doi)
+
+false_dois <- setdiff(tolower(all_oaids$doi), qa_ids$doi) # these came via
+# previously included articles that were since excluded
+
+missing_pmids <- setdiff(tolower(qa_ids$pmid), all_oaids$pmid) 
+
+# doi_changed <- cttd |> 
+#   filter(!is.na(doi_new_sgs) | !is.na(pmid_new_sgs)) |> 
+#   select(contains(c("doi", "pmid")), everything())
 
 # 
 # iv_data_manual <- read_csv(here("data", "raw", "14_iv-checks-missing-info - sa_extraction.csv"))  |> 
 #   filter(!is.na(doi) | !is.na(pmid))
 
 iv_ids <- cttd |>
-  filter(!is.na(doi) | !is.na(pmid)) |> 
-  distinct(doi, pmid) |> 
-  select(cited_work_doi = doi, cited_work = pmid)
+  filter(!is.na(doi) | !is.na(pmid) | !is.na(oaid)) |> 
+  distinct(doi, pmid, oaid) |> 
+  select(cited_work_doi = doi, cited_work_pmid = pmid, cited_work_oaid = oaid)
 
 iv_dois <- cttd |> 
   filter(!is.na(doi)) |> 
@@ -42,34 +90,93 @@ iv_pmids <- cttd |>
   distinct(pmid) |> 
   pull(pmid)
 
+iv_oaids <- cttd |> 
+  filter(!is.na(oaid)) |> 
+  distinct(oaid) |> 
+  pull(oaid)
+
 only_in_pm_no_doi <- iv_ids |> 
   filter(is.na(cited_work_doi))
 
-# dois <- sample(iv_dois, 200)
+# missing_pmid_oaids <- setdiff(iv_pmids, oaids$pmid)
 
-res <- oa_fetch(doi = iv_dois, entity = "works", mailto = Sys.getenv("EMAIL"))
+extract_ids <- function(oatib, .keep_all = FALSE) {
+  
+  extracted <- oatib |> 
+    dplyr::mutate(pmid = purrr::map_dbl(ids, \(id) purrr::pluck(id, "pmid") |> 
+                                          dplyr::coalesce(NA) |> 
+                                          stringr::str_remove_all(".*\\/") |> 
+                                          as.numeric()),
+                  doi = purrr::map_chr(ids, \(id) purrr::pluck(id, "doi") |> 
+                                         dplyr::coalesce(NA)) |> 
+                    doi_full2stripped())
+  
+  if (.keep_all == FALSE) {
+    return(
+      extracted |> 
+        dplyr::select(id, pmid, doi)
+    )
+  } else {
+    return(extracted)
+  }
+    
+}
 
-oaids <- res$id
+# 
+# iv_oaids_from_pmid <- openalexR::oa_fetch(pmid = missing_pmids,
+#                                           entity = "works", mailto = Sys.getenv("EMAIL"))
+# 
+# iv_oaids_from_pmid <- iv_oaids_from_pmid |> 
+#   extract_ids()
+# 
+# iv_oaids_from_pmid
+# 
+# iv_oaids_from_pmid <- openalexR::oa_fetch(pmid = cited_id, entity = "works", mailto = mailto)
+# 
+# iv_oaids_from_pmid |> 
+#   count(is.na(pmid))
+# 
+# iv_oaids_from_pmid <- iv_oaids_from_pmid |> 
+#   mutate(pmid = str_remove_all(pmid, ".*\\/") |> 
+#            as.numeric())
+# 
+# oaids <- pmids_from_oaid |> 
+#   bind_rows(iv_oaids_from_pmid) |> 
+#   distinct(id, pmid, doi)
 
-res2 <- oa_fetch(pmid = only_in_pm_no_doi$cited_work, entity = "works", mailto = Sys.getenv("EMAIL"))
+# dupes <- c("https://openalex.org/W2407792209",
+#            "https://openalex.org/W3185400799",
+#            "https://openalex.org/W3194736407")
+# 
+# oaids <- oaids |> 
+#   filter(!id %in% dupes)
 
-oaids2 <- res2$id
+iv_ids_missing <- iv_ids |> 
+  filter(!cited_work_pmid %in% all_oaids$pmid &
+           !cited_work_doi %in% all_oaids$doi |
+           is.na(cited_work_doi) |
+           is.na(cited_work_pmid))
+
+iv_missing_dois <- iv_ids_missing |> 
+  filter(!is.na(cited_work_doi),
+         is.na(cited_work_oaid)) |> 
+  pull(cited_work_doi)
 
 
-sb_res <- oa_snowball(identifier = c(oaids, oaids2), id_type = "original",
-                      # cited_by_params = list(from_publication_date = "2025-01-01"),
-                                          mailto = Sys.getenv("EMAIL"))
+# sb_res <- oa_snowball(identifier = c(oaids, oaids2), id_type = "original",
+#                       cited_by_params = list(from_publication_date = "2025-01-01"),
+#                                           mailto = Sys.getenv("EMAIL"))
+# 
+# sb_df <- snowball2df(sb_res)
+# 
+# sb_df |> 
+#   saveRDS(here("data", "processed", "oa_sb_results.rds"))
+# 
+# sb_df <- readRDS(here("data", "processed", "oa_sb_results.rds"))
 
-sb_df <- snowball2df(sb_res)
-
-sb_df |> 
-  saveRDS(here("data", "processed", "oa_sb_results.rds"))
-
-sb_df <- readRDS(here("data", "processed", "oa_sb_results.rds"))
-
-dois_sb <- sb_df |> 
-  transmute(doi = doi_full2stripped(doi),
-            title, id, cited_by, cited_by_api_url, cited_by_count)
+# dois_sb <- sb_df |> 
+#   transmute(doi = doi_full2stripped(doi),
+#             title, id, cited_by, cited_by_api_url, cited_by_count)
 
 # potential alternative pipeline
 # unclear what upper bound on identifiers is (or dois). Works supposedly faster with oaids
@@ -83,12 +190,12 @@ dois_sb <- sb_df |>
 # sb_df <- snowball2df(sb_res)
 
 # cited_id <- "10.1016/j.bbmt.2011.12.041"
-cited_id <- iv_pmids_only[1]
+# cited_id <- iv_pmids_only[1]
 
-oaid <- cochrane_reviews |> 
-  distinct(cited_work) |> 
-  # slice(1:20) |>
-  pull(cited_work)
+# oaid <- cochrane_reviews |> 
+#   distinct(cited_work) |> 
+#   # slice(1:20) |>
+#   pull(cited_work)
 
 oa_to_ids <- function(oaid, mailto = Sys.getenv("EMAIL")) {
   # if (stringr::str_detect(oaid, "^10\\.")) {
@@ -96,22 +203,14 @@ oa_to_ids <- function(oaid, mailto = Sys.getenv("EMAIL")) {
 
     oaid_results |> 
       # pull(pmid)
-      dplyr::mutate(pmid = purrr::map_chr(ids, \(id) purrr::pluck(id, "pmid") |> 
-                                            dplyr::coalesce(NA)),
-                    doi = purrr::map_chr(ids, \(id) purrr::pluck(id, "doi") |> 
-                                           dplyr::coalesce(NA))) |> 
-      dplyr::select(id, pmid, doi)
+      extract_ids()
 
 }
 
 
-pmids_from_oaid <- oa_to_ids(oaid)
+# cited_id <- "https://openalex.org/W2106767659"
 
-pmids_from_oaid <- pmids_from_oaid |> 
-  mutate(pmid = str_remove(pmid, ".*\\/"))
-
-pmids_from_oaid |> 
-  write_excel_csv(here("data", "processed", "pmids_from_oaid.csv"))
+# cited_id <- "10.1182/blood-2012-09-456988"
 
 get_citing_dois_from_oa <- function(cited_id, sleep = 0.5, mailto = Sys.getenv("EMAIL")) {
   
@@ -122,24 +221,30 @@ get_citing_dois_from_oa <- function(cited_id, sleep = 0.5, mailto = Sys.getenv("
       return(NULL)
     }
     cited_doi <- cited_id
-    cited_pmid <- oaid |> 
+    cited_pmid <- oaid |>
+      extract_ids() |> 
       dplyr::pull(pmid)
     oaid <- oaid |> 
       dplyr::pull(id)
     
-  } else if (stringr::str_detect(cited_id, "\\d{8,}")) {
+  } else if (stringr::str_detect(cited_id, "^\\d{8,}")) {
     oaid <- openalexR::oa_fetch(pmid = cited_id, entity = "works", mailto = mailto)
     if (rlang::is_null(oaid)) {
       warning(glue::glue("No record for id {cited_id} found on Open Alex!"))
       return(NULL)
     }
-    cited_doi <- NA
+    cited_doi <- oaid |>
+      extract_ids() |> 
+      dplyr::pull(doi)
     cited_pmid <- cited_id
     oaid <- oaid |> 
       dplyr::pull(id)
   } else {
-    cited_doi <- NA
-    cited_pmid <- NA
+    oaid <- openalexR::oa_fetch(id = cited_id, entity = "works", mailto = mailto)
+    ids <- oaid |>
+      extract_ids()
+    cited_doi <- dplyr::pull(ids, doi)
+    cited_pmid <- dplyr::pull(ids, pmid)
     oaid <- cited_id
   }
   Sys.sleep(stats::rgamma(1, sleep))
@@ -148,32 +253,23 @@ get_citing_dois_from_oa <- function(cited_id, sleep = 0.5, mailto = Sys.getenv("
            mailto = mailto) 
   
   if (rlang::is_null(records)) {
-   return(tibble::tibble(cited_by_doi = "no citations found", cited_by = "no citations found",
-                 cited_work = oaid, cited_work_doi = cited_doi, cited_work_pmid = cited_pmid))
+   return(tibble::tibble(cited_by_doi = "no citations found", cited_by_oaid = "no citations found",
+                 cited_work_oaid = oaid, cited_work_doi = cited_doi, cited_work_pmid = cited_pmid))
   } else {
     return(records |> 
-             dplyr::select(cited_by_doi = doi, cited_by = id) |> 
-             dplyr::mutate(cited_work = oaid,
+             dplyr::select(cited_by_doi = doi, cited_by_oaid = id) |> 
+             dplyr::mutate(cited_work_oaid = oaid,
                            cited_work_doi = cited_doi,
                            cited_work_pmid = cited_pmid))
   }
 }
 
-
-iv_cites <- iv_dois |> # takes ca. 4-5 hours!!!
-  map(get_citing_dois_from_oa, .progress = TRUE)
-
-iv_pmids_only <- iv_data |> 
-  filter(has_pubmed == TRUE, has_doi == FALSE) |> 
-  pull(pmid)
-
-iv_cites_pmids <- iv_pmids_only |> 
+handlers(global = TRUE)
+# p <- progressr::progressor(along = iv_oaids)
+iv_cites <- iv_oaids |> # takes ca. 4-5 hours from dois and 2 hours from oaids!
   map(get_citing_dois_from_oa, .progress = TRUE)
 
 iv_citations <- iv_cites |> 
-  list_rbind()
-
-iv_citations_pmids <- iv_cites_pmids |> 
   list_rbind()
 
 iv_citations |> 
@@ -181,12 +277,9 @@ iv_citations |>
 
 iv_citations <- readRDS(here("data", "processed", "citations.rds"))
 
-iv_citations <- iv_citations |> 
-  mutate(cited_work_pmid = NA) |> 
-  bind_rows(iv_citations_pmids)
-
 # Cochrange systematic Reviews have a doi schema:
-# cochrane_cd_regex <- "10\\.1002\\/14651858\\.cd.*pub" 
+# cochrane_cd_regex <- "10\\.1002\\/14651858\\.cd.*pub" # fpr every publication
+# after the first, which is usually a protocol
 cochrane_cd_regex <- "10\\.1002\\/14651858\\.cd."
 # consider deversioning the dois or not?
 
@@ -201,174 +294,30 @@ has_cochrane <- iv_citations |>
 has_cochrane |> 
   count(has_cochrane_review)
 
-pmids_from_oaid <- read_csv(here("data", "processed", "pmids_from_oaid.csv")) |> 
-  distinct(id, .keep_all = TRUE)
 
-####### TODO use rentrez history as in tutorial
+progressr::with_progress({
+  cochrane_meta <- cochrane_reviews |> 
+    distinct(cochrane_doi) |> 
+    get_metadata(cochrane_doi, chunksize = 50, api_key = Sys.getenv("NCBI_KEY"))
+})
 
-cochrane_reviews_types <- cochrane_reviews |>
-  left_join(pmids_from_oaid, by = c("cited_work" = "id")) |> 
-  mutate(cited_work_pmid = coalesce(cited_work_pmid, pmid)) |> 
-  select(-pmid, -doi)
- 
-cochrane_pmids_prior <- ivcpm |>
-  filter(str_detect(cited_by_doi, cochrane_cd_regex)) |>
-  distinct(cited_by, cited_by_doi) |>
-  rename(cochrane_pmid = cited_by,
-         cochrane_doi = cited_by_doi)
+# two of the .pub2 results are actually protocols
 
-cochrane_pmids <- cochrane_reviews_types |>
-  distinct(cited_by) |>
-  pull(cited_by) |>
-  oa_to_ids()
+cochrane_pmids <- cochrane_meta |>
+  list_rbind() |> 
+  mutate(doi = tolower(doi))
 
-cochrane_pmids <- cochrane_pmids |> 
-  transmute(cochrane_id = id,
-            cochrane_pmid = str_remove(pmid, ".*\\/"),
-            cochrane_doi = str_extract(doi, "10\\..*"))
+cochrane_pmids |>
+  write_excel_csv(here("data", "processed", "cochrane_pmids.csv"))
 
-cochrane_pmids_missing <- cochrane_pmids |> 
-  filter(is.na(cochrane_pmid)) |> 
-  select(-cochrane_pmid) |> 
-  left_join(cochrane_pmids_prior, by = "cochrane_doi")
+cochrane_pmids <- read_csv(here("data", "processed", "cochrane_pmids.csv"))
 
-cochrane_metadata <- cochrane_pmids_missing |> 
-  filter(is.na(cochrane_pmid),
-         str_detect(cochrane_doi, "pub")) |> 
-  get_metadata(cochrane_doi, chunksize = 50, api_key = Sys.getenv("NCBI_KEY"))
-
-cochrane_metadata <- cochrane_metadata |> 
-  # list_rbind() |> 
-  select(cochrane_doi = doi,
-         cochrane_pmid = pmid) |> 
-  mutate(cochrane_doi = tolower(cochrane_doi))
-
-cochrane_pmids_missing <- cochrane_pmids_missing |> 
-  rows_update(cochrane_metadata, by = "cochrane_doi") |> 
-  mutate(cochrane_pmid = as.character(cochrane_pmid))
-
-cochrane_pmids <- cochrane_pmids |> 
-  rows_update(cochrane_pmids_missing, by = "cochrane_doi") |> 
-  filter(!is.na(cochrane_pmid))
-
-cochrane_reviews_types |>
-  left_join(cochrane_pmids, by = "cochrane_doi") |> 
-  slice(459) |> 
-  t()
-
-rate <- rate_delay(0.2)
-cochrane_reviews_types <- cochrane_reviews_types |>
-  left_join(cochrane_pmids, by = "cochrane_doi") |> 
-  # select(-oaid) |>
-  filter(!is.na(cochrane_pmid)) |> 
-  mutate(cited_work_id = ifelse(!is.na(cited_work_pmid), cited_work_pmid, cited_work_doi)) |> 
-  mutate(cochrane_citation_type = map2_chr(cited_work_id, cochrane_pmid, \(x, y) slow_get_cochrane_citation_type(cited_id = x,
-                                                             cochrane_id = y,
-                                                             key = Sys.getenv("ENTREZ_KEY"),
-                                                             rate = rate),
-                                           .progress = TRUE))
-
-get_cochrane_citation_type(cited_id = "26738812",
-                           cochrane_id = "35028933",
-                           key = Sys.getenv("ENTREZ_KEY"))
-
-
-cochrane_reviews_types <- cochrane_reviews_types |>
-  group_by(cited_work, cited_work_doi, cited_work_pmid) |>
-  mutate(work_has_cochrane_included = any(cochrane_citation_type == "included"),
-         work_has_cochrane_excluded = any(cochrane_citation_type == "excluded"),
-         work_has_cochrane_not_found = any(cochrane_citation_type == "not_found")) |>
-  ungroup()
-
-
-
-cochrane_reviews_types |>
-  filter(work_has_cochrane_included == FALSE,
-         work_has_cochrane_not_found == TRUE) |>
-  count(cited_work)
-
-cochrane_reviews_types |> 
-  select(-cited_by, -cited_by_doi) |> 
-  write_excel_csv2(here("data", "processed", "cochrane_reviews_types.csv"))
-
-cochrane_reviews_types <- read_csv(here("data", "processed", "cochrane_reviews_types.csv"))
-
-cochrane_summaries <- cochrane_reviews_types |> 
-  group_by(cited_work, cited_work_doi, cited_work_pmid) |> 
-  summarise(has_cochrane_included = any(cochrane_citation_type == "included"),
-            # has_no_cochrane_included = !any(cochrane_citation_type == "included"),
-            has_cochrane_excluded = any(cochrane_citation_type == "excluded"),
-            has_cochrane_not_found = any(cochrane_citation_type == "not_found")) |> 
-  ungroup()
-
-cochrane_summaries |> 
-  count(has_cochrane_included, has_no_cochrane_included)
-
-cochrane_summaries |> 
-  count(has_cochrane_included)
-
-cochrane_summaries |> 
-  count(!has_cochrane_included, has_cochrane_not_found)
-
-cochrane_summaries |> 
-  filter()
-
-cochrane_reviews_types2 |>
-  slice(528) |> 
-  t()
-
-get_cochrane_citation_type(cited_id = "21474646",
-                           cochrane_id = "23450552",
-                           key = Sys.getenv("ENTREZ_KEY"))
-
-dois <- iv_dois[1:50]
-
-# cited_doi <- "10.3389/fnagi.2015.00152"
-pmid <- "20818904"
-doi <- "10.1002/14651858.CD005343.pub3"
-cited_id <- pmid
-cochrane_id <- "24203004"
-# Find citing articles
-citing_articles <- entrez_link(dbfrom="pubmed", id=pmid, db="pubmed")
-# Get the PubMed IDs of citing articles
-citing_pmids <- citing_articles$links$pubmed_pubmed_citedin
-
-
-dois_citing <- get_metadata(tibble(pmid = citing_pmids), pmid, api_key = Sys.getenv("NCBI_KEY"))
-
- 
-# summaries <- entrez_summary(db="pubmed", id=citing_pmids)
-# 
-# summaries <- entrez_summary(db="pubmed", id=pmid)
-# usethis::edit_r_environ()
-# refs <- entrez_fetch(db="pubmed", id = pmid, rettype = "xml") #, parsed = TRUE)
-
-
-# rr <- refs |> xml2::read_xml()
-# 
-# # cited_id <- "10.3389/fnagi.2015.00152"
-# cr_res <- cr_works(dois=doi, .progress = "text")
-# cr_refs <- cr_res$data$reference[[1]]
-
-# cited_id <- "10.1302/2633-1462.36.BJO2022-0036"
-# citing_id <- pmid
-
-##### only works with pmids! not with dois!!!!!
+cochrane_reviews <- cochrane_reviews |> 
+  left_join(cochrane_pmids |> select(cochrane_doi = doi, cochrane_pmid = pmid)) 
 
 get_cochrane_citation_type <- function(cited_id, cochrane_id, key) {
   
   rentrez::set_entrez_key(key = key)
-  
-  # if (stringr::str_detect(cited_id, "^10\\.")) {
-  #   cited_id_pmid <- easyRPubMed::id_to_meta(cited_id, api_key = Sys.getenv("NCBI_KEY")) 
-  # 
-  #   cited_id_pmid |> 
-  #     xml2::xml_find_first(xpath = "//ArticleId")
-  #     
-  #   easyRPubMed::id_to_meta("10.1016/s0168-8278(11)60030-5", api_key = Sys.getenv("NCBI_KEY")) 
-  # } else {
-  #   cited_id_pmid <- cited_id
-  # }
   
   cited_id <- tolower(cited_id)
   
@@ -406,12 +355,67 @@ get_cochrane_citation_type <- function(cited_id, cochrane_id, key) {
   
 }
 
-rate <- rate_delay(0.1)
+
+rate <- rate_delay(20) # smaller rates like 1 resulted in timeouts, unless chuncked by about 200 at a time
+
 slow_get_cochrane_citation_type <- slowly(\(cited_id, cochrane_id, key, rate) get_cochrane_citation_type(cited_id, cochrane_id, key), rate = rate, quiet = FALSE)
 
-get_cochrane_citation_type(cited_id = "1593914", cochrane_id = pmid, key = Sys.getenv("ENTREZ_KEY"))
+key <- Sys.getenv("ENTREZ_KEY")
+cochrane_reviews_types_resp <- cochrane_reviews |>
+  filter(!is.na(cochrane_pmid)) |>
+  mutate(cited_work_id = ifelse(!is.na(cited_work_pmid), cited_work_pmid, cited_work_doi)) |> 
+  # slice(401:771) |> 
+  mutate(cochrane_citation_type = map2_chr(cited_work_id, cochrane_pmid, \(x, y) slow_get_cochrane_citation_type(cited_id = x,
+                                                             cochrane_id = y,
+                                                             key = key,
+                                                             rate = rate),
+                                           .progress = TRUE))
 
-get_citing_pmids_from_pubmed <- function(cited_id, sleep = 1, api_key = Sys.getenv("NCBI_KEY")) {
+cochrane_reviews_types_resp |>
+  write_csv(here("data", "processed", "cochrane_citation_types.csv"))
+# 
+# get_cochrane_citation_type(cited_id = "23594786",
+#                            cochrane_id = "27432490",
+#                            key = Sys.getenv("ENTREZ_KEY"))
+
+
+
+cochrane_reviews_types <- cochrane_reviews_types_resp |>
+  group_by(cited_work_oaid, cited_work_doi, cited_work_pmid) |>
+  mutate(work_has_cochrane_included = any(cochrane_citation_type == "included"),
+         work_has_cochrane_excluded = any(cochrane_citation_type == "excluded"),
+         work_has_cochrane_not_found = any(cochrane_citation_type == "not_found")) |>
+  ungroup()
+
+# cochrane_reviews_types |>
+#   filter(work_has_cochrane_included == FALSE,
+#          work_has_cochrane_not_found == TRUE) |>
+#   count(cited_work_oaid)
+
+cochrane_reviews_types |> 
+  rename(cochrane_oaid = cited_by_oaid) |> 
+  select(contains("cited_work"), contains("cochrane")) |> 
+  write_excel_csv(here("data", "processed", "cochrane_reviews_types.csv"))
+
+cochrane_reviews_types <- read_csv(here("data", "processed", "cochrane_reviews_types.csv"))
+
+cochrane_summaries <- cochrane_reviews_types |> 
+  group_by(cited_work_oaid, cited_work_doi, cited_work_pmid) |> 
+  summarise(has_cochrane_included = any(cochrane_citation_type == "included"),
+            # has_no_cochrane_included = !any(cochrane_citation_type == "included"),
+            has_cochrane_excluded = any(cochrane_citation_type == "excluded"),
+            has_cochrane_not_found = any(cochrane_citation_type == "not_found")) |> 
+  ungroup()
+
+cochrane_summaries |> 
+  count(has_cochrane_included)
+
+cochrane_summaries |> 
+  count(!has_cochrane_included, has_cochrane_not_found)
+
+# cited_id <- iv_pmids[1]
+
+get_citing_pmids_from_pubmed <- function(cited_id, sleep = 5, api_key = Sys.getenv("NCBI_KEY")) {
   
   if (stringr::str_detect(cited_id, "^10\\.")) {
     
@@ -428,62 +432,110 @@ get_citing_pmids_from_pubmed <- function(cited_id, sleep = 1, api_key = Sys.gete
     cited_doi <- NA
     pmid <- cited_id
   }
-  Sys.sleep(stats::rgamma(1, sleep))
-  
+  Sys.sleep(sleep)
+  message(paste("Querying ID", pmid))
   records <- rentrez::entrez_link(dbfrom="pubmed", id=pmid, db="pubmed")
   
   if (rlang::is_null(records)) {
-    return(tibble::tibble(cited_by_doi = "no citations found", cited_by = "no citations found",
-                          cited_work = pmid, cited_work_doi = cited_doi))
+    return(tibble::tibble(cited_by_doi = "no citations found", cited_by_pmid = "no citations found",
+                          cited_work_pmid = pmid, cited_work_doi = cited_doi))
   } else {
     return(
       # Get the PubMed IDs of citing articles
       
-      tibble::tibble(cited_by = records$links$pubmed_pubmed_citedin,
-                     cited_work = pmid, cited_work_doi = cited_doi)
+      tibble::tibble(cited_by_pmid = records$links$pubmed_pubmed_citedin,
+                     cited_work_pmid = pmid, cited_work_doi = cited_doi)
     )
   }
 }
 
+# 3 per second = 180 per minute = 10800 per hour = 1800 per 10 minutes
 
+### Above function unrealistic 
+# Users are expected to know a little bit about the EUtils API,
+# which is well documented: https://www.ncbi.nlm.nih.gov/books/NBK25500/
+  
+# The NCBI will ban IPs that don't use EUtils within their user guidelines.
+# In particular /enumerated /item Don't send more than three request per second
+# (rentrez enforces this limit) /item If you plan on sending a sequence of more
+# than ~100 requests, do so outside of peak times for the US /item For large requests
+# use the web history method (see examples for entrez_search or use entrez_post to upload IDs)
+
+
+### TODO: continue from here tomorrow
+
+iv_cites_pm <- iv_pmids |> # takes ca. 1 hour
+  map(get_citing_pmids_from_pubmed, .progress = TRUE)
+
+buffered_query <- function(source_vec, buffer_file_path, name_col, .f_query, .n_checkpoint = 2) {
+  if (!file.exists(buffer_file_path)) {
+    output_data <- NULL
+    unprocessed_vec <- source_vec
+  } else {
+    output_data <- readRDS(buffer_file_path)
+    last_processed <- output_data[[length(output_data)]] |> 
+      dplyr::slice(1) |> 
+      dplyr::pull({{name_col}}) 
+    message(paste("Starting after:", last_processed))
+    unprocessed_vec <- source_vec[(which(iv_pmids == last_processed) + 1):
+                                    length(source_vec)]
+    unprocessed_vec
+  }
+  
+  unprocessed_tib <- tibble(source = unprocessed_vec) |> 
+    dplyr::mutate(chunk = 1 + cumsum(dplyr::if_else(
+      dplyr::row_number() %% .n_checkpoint == 0, 1, 0)))
+  
+  n_chunks <- ceiling(length(unprocessed_tib) / .n_checkpoint)
+  
+  ls_ids <- split(unprocessed_tib, f = unprocessed_tib$chunk) |> 
+    purrr::map(\(ch) dplyr::pull(ch, source))
+  p <- progressr::progressor(along = ls_ids)
+  
+  for (i in 1:length(ls_ids)) {
+    chunked_output <- ls_ids[[i]] |> 
+      purrr::map(\(chunk) .f_query(chunk))
+    output_data <- append(output_data, chunked_output)
+    saveRDS(output_data, buffer_file_path)
+    p()
+  }
+  return(output_data)
+}
+
+handlers(global = TRUE)
+
+ret <- buffered_query(source_vec = iv_pmids,
+                      here("data", "processed", "buffered_pmid_ffcs.rds"), cited_work_pmid,
+               get_citing_pmids_from_pubmed)
+
+iv_citations_pm <- readRDS(here("data", "processed", "buffered_pmid_ffcs.rds")) |>
+  list_rbind()
 # 
-# iv_cites_pm <- iv_pmids |> # takes ca. 1 hour
-#   map(get_citing_pmids_from_pubmed, .progress = TRUE)
+# write_excel_csv(iv_citations_pm, here("data", "pmid_citations_no_doi.csv"))
 # 
-# iv_citations_pm <- iv_cites_pm |> 
-#   list_rbind()
-
-# write_excel_csv2(iv_citations_pm, here("data", "pmid_citations_no_doi.csv"))
-
-iv_citations_pm <- read_csv2(here("data", "pmid_citations_no_doi.csv"))
+# iv_citations_pm <- read_csv(here("data", "pmid_citations_no_doi.csv"))
 
 iv_citations_pm_deduped <- iv_citations_pm |> 
-  distinct(cited_by)
+  distinct(cited_by_pmid)
 
-
-iv_cites_pm_dois <- get_metadata(iv_citations_pm_deduped, cited_by, api_key = Sys.getenv("NCBI_KEY"))
+iv_cites_pm_dois <- get_metadata(iv_citations_pm_deduped, cited_by_pmid, api_key = Sys.getenv("NCBI_KEY"))
 
 iv_citations_pm_dois <- iv_cites_pm_dois |> 
   list_rbind()
 
 iv_citations_pm_dois <- iv_citations_pm_dois |> 
   mutate(cited_by_doi = tolower(doi)) |> 
-  select(cited_by = pmid, cited_by_doi, journal, pubtype)
+  select(cited_by_pmid = pmid, cited_by_doi, journal, pubtype)
 
 ivcpm <- iv_citations_pm |> 
-  mutate(cited_by = as.double(cited_by)) |> 
-  left_join(iv_citations_pm_dois, by = "cited_by")
+  mutate(cited_by_pmid = as.double(cited_by_pmid)) |> 
+  left_join(iv_citations_pm_dois, by = "cited_by_pmid")
 
 ## add dois of cited articles from original data.frame
 ivcpm <- ivcpm |> 
   select(-cited_work_doi) |> 
-  left_join(iv_ids, by = "cited_work") |> 
+  left_join(iv_ids, by = "cited_work_pmid") |> 
   select(contains("cited_work"), contains("cited_by"), everything())
-#   
-# ivcpm |> 
-#   write_excel_csv2(here("data", "pmid_citations.csv"))
-# 
-# ivcpm <- read_csv2(here("data", "pmid_citations.csv"))
 
 ivcpm |> 
   saveRDS(here("data", "processed", "citations_pmid.rds"))
@@ -494,7 +546,6 @@ crsr <- ivcpm |>
   filter(str_detect(journal, "Cochrane"),
          !str_detect(pubtype, "(R|r)eview")
   )
-
 
 has_cochrane_pmid <- ivcpm |> 
   group_by(cited_work_doi) |> 
@@ -526,7 +577,7 @@ has_cochrane_pmid |>
 
 doi_results_pm <- ivcpm |> 
   mutate(doi_or_pmid = case_when(
-    str_length(cited_by_doi) < 5 | is.na(cited_by_doi) ~ as.character(cited_by),
+    str_length(cited_by_doi) < 5 | is.na(cited_by_doi) ~ as.character(cited_by_pmid),
     .default = cited_by_doi
   )) |> 
   distinct(doi_or_pmid, .keep_all = TRUE)
@@ -681,12 +732,12 @@ iv_missed_citations <- iv_missed_doi_cites |>
 iv_citations <- iv_citations |> 
   bind_rows(iv_missed_citations)
 
-neither <- publications |> 
-  filter(is.na(doi) & is.na(pmid)) |> 
-  select(id, url, publication_date, everything())
-
-neither |> 
-  write_excel_csv2(here("data", "processed", "missing_pmids_dois.csv"))
+# neither <- publications |> 
+#   filter(is.na(doi) & is.na(pmid)) |> 
+#   select(id, url, publication_date, everything())
+# 
+# neither |> 
+#   write_excel_csv2(here("data", "processed", "missing_pmids_dois.csv"))
 
 publications |> 
   # distinct(id, .keep_all = TRUE) |>
